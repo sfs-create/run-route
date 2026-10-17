@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>ランルート</title>
+<meta name="apple-mobile-web-app-title" content="ランルート">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -195,6 +200,8 @@ dialog form{display:flex;flex-direction:column;gap:10px}
 dialog label.inline{display:flex;align-items:center;gap:8px;font-size:14px}
 dialog .text{width:100%}
 dialog a{color:var(--accent)}
+.steps{margin:0;padding-left:1.3em;display:flex;flex-direction:column;gap:8px;font-size:14px}
+#banner{cursor:pointer}
 
 @media (min-width:900px){
   .sheet{top:calc(16px + env(safe-area-inset-top,0px));bottom:16px;left:16px;right:auto;width:410px;max-height:none;border-radius:20px}
@@ -377,6 +384,27 @@ dialog a{color:var(--accent)}
   </div>
 </div>
 
+<dialog id="dlgLoc">
+  <form method="dialog">
+    <h2>現在地を使うには</h2>
+    <p id="locHelpWhy" class="hint"></p>
+    <ol class="steps">
+      <li>「設定」アプリ →「プライバシーとセキュリティ」→「位置情報サービス」をオン</li>
+      <li>同じ画面の下にある「Safari Webサイト」→「このAppの使用中のみ許可」を選び、「正確な位置情報」もオン</li>
+      <li>「設定」→「アプリ」→「Safari」→「位置情報」を「確認」か「許可」にする</li>
+    </ol>
+    <div id="locHelpHome" class="card">
+      <strong>ホーム画面から開いている場合</strong>
+      <p class="hint">上の設定をしても取れないときは、ホーム画面のアイコンを長押しして削除し、Safariで開き直してから共有ボタン →「ホーム画面に追加」で追加し直してください。追加の画面に「Webアプリとして開く」がある場合は、オフにするとSafariで開くようになり、確実に現在地が取れます。</p>
+    </div>
+    <p class="hint">それでも取れない場合は、地図をタップして出発地を指定できます。</p>
+    <div class="actions" style="grid-template-columns:1fr 1fr">
+      <button value="cancel" class="btn">閉じる</button>
+      <button class="btn primary" id="btnLocRetry">もう一度試す</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlgSettings">
   <form method="dialog" id="settingsForm">
     <h2>設定</h2>
@@ -539,7 +567,7 @@ function fitPad(){
 let toastT;
 function toast(msg, ms = 3200){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, ms); }
 function banner(msg, warn){ const b = $('#banner'); b.textContent = msg; b.classList.toggle('warn', !!warn); b.hidden = false; }
-function hideBanner(){ $('#banner').hidden = true; $('#banner').classList.remove('mode'); }
+function hideBanner(){ S.locFail = false; $('#banner').hidden = true; $('#banner').classList.remove('mode'); }
 
 /* ---------- テーマ ---------- */
 const themes = ['system', 'dark', 'light'];
@@ -561,20 +589,50 @@ $('#btnTheme').onclick = () => { themeIdx = (themeIdx+1) % 3; applyTheme(); toas
 try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', restyle); } catch(e){}
 
 /* ---------- 位置情報 ---------- */
-function locate(fly = true){
+const isStandalone = () => !!(navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches));
+function getPos(opts){ return new Promise((ok, ng) => navigator.geolocation.getCurrentPosition(ok, ng, opts)); }
+function watchOnce(ms){
+  return new Promise((ok, ng) => {
+    let id = null; const t = setTimeout(() => { if (id != null) navigator.geolocation.clearWatch(id); ng({ code: 3 }); }, ms);
+    id = navigator.geolocation.watchPosition(p => { clearTimeout(t); navigator.geolocation.clearWatch(id); ok(p); }, e => { if (e.code === 1){ clearTimeout(t); navigator.geolocation.clearWatch(id); ng(e); } }, { enableHighAccuracy: true, maximumAge: 0 });
+  });
+}
+let locating = false;
+async function locate(fly = true){
   if (!navigator.geolocation){ askStart('この端末では位置情報が使えません。'); return; }
+  if (locating) return; locating = true;
   banner('現在地を取得しています…');
-  navigator.geolocation.getCurrentPosition(p => {
+  let p = null, err = null;
+  /* 高精度 → 低精度 → 連続取得の順に試す（ホーム画面から開いたときに1回目が失敗することがあるため） */
+  for (const tryIt of [
+    () => getPos({ enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }),
+    () => getPos({ enableHighAccuracy: false, timeout: 12000, maximumAge: 300000 }),
+    () => watchOnce(15000)
+  ]){
+    try { p = await tryIt(); break; } catch(e){ err = e; if (e && e.code === 1) break; }
+  }
+  locating = false;
+  if (p){
     const ll = [p.coords.latitude, p.coords.longitude];
     hideBanner(); showMe(ll, p.coords.accuracy);
     if (!N.active) setStart(ll);
     if (fly) map.setView(ll, 15);
-  }, err => {
-    askStart(err.code === 1 ? '位置情報の利用が許可されていません（ブラウザの設定で許可できます）。' : '現在地を取得できませんでした。');
-  }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 });
+    return;
+  }
+  const denied = err && err.code === 1;
+  askStart(denied ? '位置情報が許可されていません。' : '現在地を取得できませんでした。');
+  S.locFail = true;
+  if (denied || isStandalone()) showLocHelp(denied);
 }
+function showLocHelp(denied){
+  $('#locHelpWhy').textContent = denied ? '位置情報の利用が許可されていないため、現在地を取得できませんでした。' : '現在地を取得できませんでした。';
+  $('#locHelpHome').hidden = !isStandalone();
+  if (!$('#dlgLoc').open) $('#dlgLoc').showModal();
+}
+$('#banner').addEventListener('click', () => { if (S.locFail) showLocHelp(false); });
+$('#btnLocRetry').onclick = e => { e.preventDefault(); $('#dlgLoc').close(); S.locFail = false; locate(true); };
 function askStart(msg){ if (S.tapMode === 'via') setViaMode(false); S.tapMode = 'start'; banner((msg ? msg + ' ' : '') + '地図をタップして出発地を指定してください。', !!msg); }
-$('#btnLocate').onclick = () => locate(true);
+$('#btnLocate').onclick = () => { S.locFail = false; locate(true); };
 $('#btnPickStart').onclick = () => { askStart(''); if (innerWidth < 900) collapse(true); };
 
 map.on('click', e => {
