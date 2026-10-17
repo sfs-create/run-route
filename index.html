@@ -407,7 +407,9 @@ const store = {
 };
 class AppError extends Error {}
 /* 共有キー：設定で自分のキーを入れていない人はこのキーを使う */
-const SHARED_ORS_KEY = '';
+const SHARED_ORS_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjMzM2U0OGQ4MjBkZjRjMjNhM2IxOWM4NjRhNzk0YTYxIiwiaCI6Im11cm11cjY0In0=';
+const ORS_BASES = ['https://api.heigit.org/openrouteservice', 'https://api.openrouteservice.org'];
+let orsBaseIdx = Math.min(ORS_BASES.length - 1, Math.max(0, +store.get('orsBase', 0) || 0));
 const orsKey = () => store.get('orsKey', '') || SHARED_ORS_KEY;
 const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
@@ -708,12 +710,20 @@ async function ors(points, opt = {}){
   const useW = Object.keys(w).length && !opt.noWeights;
   if (useW) options.profile_params = { weightings: w };
   if (Object.keys(options).length) body.options = options;
-  let res;
-  try {
-    res = await fetch('https://api.openrouteservice.org/v2/directions/foot-walking/geojson', {
-      method: 'POST', headers: { 'Authorization': key, 'Content-Type': 'application/json', 'Accept': 'application/json, application/geo+json' }, body: JSON.stringify(body)
-    });
-  } catch(e){ throw new AppError('通信できませんでした。電波の状況を確認して、もう一度お試しください。'); }
+  let res = null;
+  /* 新しいアドレス（api.heigit.org）を優先し、つながらなければ旧アドレスへ */
+  const order = ORS_BASES.map((_, i) => (orsBaseIdx + i) % ORS_BASES.length);
+  for (const i of order){
+    try {
+      const r = await fetch(ORS_BASES[i] + '/v2/directions/foot-walking/geojson', {
+        method: 'POST', headers: { 'Authorization': key, 'Content-Type': 'application/json', 'Accept': 'application/json, application/geo+json' }, body: JSON.stringify(body)
+      });
+      if (r.status === 404 || r.status === 405 || r.status >= 500){ res = res || r; continue; }
+      res = r; if (orsBaseIdx !== i){ orsBaseIdx = i; store.set('orsBase', i); }
+      break;
+    } catch(e){ /* 通信エラー：次のアドレスを試す */ }
+  }
+  if (!res) throw new AppError('通信できませんでした。電波の状況を確認して、もう一度お試しください。');
   if (!res.ok){
     let j = null; try { j = await res.json(); } catch(e){}
     const err = j && j.error, code = err && (err.code ?? null), msg = (err && (err.message || (typeof err === 'string' ? err : ''))) || '';
