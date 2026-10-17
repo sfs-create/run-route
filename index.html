@@ -170,6 +170,7 @@ h3{font-size:14px;margin:0;color:var(--muted);letter-spacing:.04em}
 .list .btns{display:flex;gap:6px;flex-wrap:wrap}
 .list .btns button{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 12px;font-size:13px;font-weight:700}
 .list .btns .del{color:var(--warn)}
+.list .btns .gm{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 12px;font-size:13px;font-weight:700;color:var(--ink);text-decoration:none}
 .empty{color:var(--muted);font-size:13px;margin:0}
 .histsum{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .histsum div{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;display:flex;flex-direction:column}
@@ -200,6 +201,7 @@ dialog form{display:flex;flex-direction:column;gap:10px}
 dialog label.inline{display:flex;align-items:center;gap:8px;font-size:14px}
 dialog .text{width:100%}
 dialog a{color:var(--accent)}
+.btn.gmaps{display:flex;align-items:center;justify-content:center;text-decoration:none;color:var(--ink)}
 .steps{margin:0;padding-left:1.3em;display:flex;flex-direction:column;gap:8px;font-size:14px}
 #banner{cursor:pointer}
 
@@ -330,7 +332,9 @@ dialog a{color:var(--accent)}
       <div class="field" id="saveField" hidden>
         <label for="routeName">このルートを保存</label>
         <div class="row"><input id="routeName" class="text" placeholder="例：川沿い5km" maxlength="40"><button class="btn small primary" id="btnSave">保存</button></div>
+        <a class="btn small gmaps" id="btnGmaps" href="#" target="_blank" rel="noopener">Googleマップで開く（ナビ）</a>
         <button class="btn ghost small" id="btnGpx">GPXファイルを出力</button>
+        <p class="hint">Googleマップには通過地点を8か所渡します。Googleマップが道を計算し直すため、細かい道順が少し変わることがあります。</p>
       </div>
     </div>
 
@@ -985,7 +989,7 @@ function setRoute(r, fit){
   updateSummary(); renderInfo(); drawElev();
   $('#saveField').hidden = false; $('#poiField').hidden = false; $('#btnAlt').disabled = false;
   $('#routeName').value = r.name || '';
-  loadPois();
+  loadPois(); syncGmaps();
   store.set('lastRoute', compact(r));
 }
 function drawRoute(fit){
@@ -1158,6 +1162,19 @@ function download(filename, text){
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 const fileSafe = s => s.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40);
+/* Googleマップのルート検索URL（徒歩）。通過地点はルート上から距離が均等になるよう選ぶ */
+function gmapsUrl(coords, shape){
+  const cum = cumDist(coords), total = cum[cum.length-1] || 1;
+  const f = c => `${(+c[0]).toFixed(6)},${(+c[1]).toFixed(6)}`;
+  const at = m => { let i = cum.findIndex(d => d >= m); if (i < 1) i = 1; const t = (m - cum[i-1])/Math.max(1e-6, cum[i] - cum[i-1]); const a = coords[i-1], b = coords[i]; return [a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t]; };
+  // 往復は折り返しまでの片道分に地点を集め、戻りは同じ道をたどる
+  const span = shape === 'outback' ? total/2 : total, n = 8;
+  const wps = [];
+  for (let k = 1; k <= n; k++) wps.push(at(span*k/(shape === 'outback' ? n : n+1)));
+  const q = new URLSearchParams({ api: '1', origin: f(coords[0]), destination: f(coords[coords.length-1]), travelmode: 'walking' });
+  return 'https://www.google.com/maps/dir/?' + q.toString() + '&waypoints=' + wps.map(f).join('%7C');
+}
+function syncGmaps(){ const a = $('#btnGmaps'); if (S.route) a.href = gmapsUrl(S.route.coords, S.route.shape); }
 $('#btnGpx').onclick = () => {
   const r = S.route; if (!r) return;
   const name = $('#routeName').value.trim() || r.name || `ランルート_${km(r.distance)}km`;
@@ -1166,7 +1183,7 @@ $('#btnGpx').onclick = () => {
 };
 function renderSaved(){
   const favs = store.get('favs', []), fl = $('#favList');
-  fl.innerHTML = favs.length ? favs.map(f => `<li data-id="${f.id}"><div class="top"><span class="name">${esc(f.name)}</span><span class="meta">${km(f.distance)} km · ↑${Math.round(f.ascent)} m</span></div><div class="btns"><button data-act="show">地図に表示</button><button data-act="gpx">GPX</button><button data-act="del" class="del">削除</button></div></li>`).join('') : '<p class="empty">まだありません。ルートを作成して「保存」すると、ここに並びます。</p>';
+  fl.innerHTML = favs.length ? favs.map(f => `<li data-id="${f.id}"><div class="top"><span class="name">${esc(f.name)}</span><span class="meta">${km(f.distance)} km · ↑${Math.round(f.ascent)} m</span></div><div class="btns"><button data-act="show">地図に表示</button><a class="gm" href="${gmapsUrl(f.coords, f.shape)}" target="_blank" rel="noopener">Googleマップ</a><button data-act="gpx">GPX</button><button data-act="del" class="del">削除</button></div></li>`).join('') : '<p class="empty">まだありません。ルートを作成して「保存」すると、ここに並びます。</p>';
   const hist = store.get('hist', []), hl = $('#histList');
   const now = new Date(), monthKm = hist.filter(h => { const d = new Date(h.date); return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth(); }).reduce((a, h) => a + h.dist, 0);
   $('#histSum').innerHTML = `<div><span class="lbl">今月</span><b>${km(monthKm)}<small> km</small></b></div><div><span class="lbl">合計回数</span><b>${hist.length}<small> 回</small></b></div><div><span class="lbl">最長</span><b>${km(hist.reduce((a, h) => Math.max(a, h.dist), 0))}<small> km</small></b></div>`;
