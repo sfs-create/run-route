@@ -142,6 +142,18 @@ input[type=range]{width:100%;accent-color:var(--route);height:32px}
 .gps{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
 .gps i{width:8px;height:8px;border-radius:50%;background:var(--muted)}
 .gps.good i{background:var(--ok)}.gps.weak i{background:var(--warn)}
+/* ポケットモード：有機ELで電力を抑える真っ黒な画面。長押しで解除 */
+.pocket{position:fixed;inset:0;z-index:3000;background:#000;color:#4a4a4a;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:40px;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;padding:env(safe-area-inset-top,0px) 16px env(safe-area-inset-bottom,0px)}
+.pocket .pk-dist{font-family:var(--f-num);font-size:72px;font-weight:700;line-height:1;text-align:center}
+.pocket .pk-dist small{font-size:22px;margin-left:4px}
+.pocket .pk-time{font-family:var(--f-num);font-size:34px;text-align:center;margin-top:8px}
+.pocket .pk-hold{display:flex;flex-direction:column;align-items:center;gap:10px;font-size:14px}
+.pocket .ring{width:84px;height:84px}
+.pocket .ring circle{fill:none;stroke-width:5}
+.pocket .ring .bg{stroke:#222}
+.pocket .ring .fg{stroke:#5a5a5a;stroke-dasharray:239;stroke-dashoffset:239;transform:rotate(-90deg);transform-origin:50% 50%}
+.pocket.holding .ring .fg{stroke-dashoffset:0;transition:stroke-dashoffset 1.2s linear}
+.pocket .pk-gps{font-size:13px}
 
 /* 保存 */
 h3{font-size:14px;margin:0;color:var(--muted);letter-spacing:.04em}
@@ -329,6 +341,7 @@ dialog a{color:var(--accent)}
         <button class="btn primary" id="btnNavStart">スタート</button>
         <button class="btn" id="btnNavPause" hidden>一時停止</button>
         <button class="btn danger" id="btnNavStop" hidden>終了</button>
+        <button class="btn" id="btnPocket" hidden style="grid-column:1/-1">ポケットモード（画面を黒くして誤タッチ防止）</button>
       </div>
       <div class="chips">
         <label class="chip"><input type="checkbox" id="optVoice" checked><span>1kmごとに音声</span></label>
@@ -336,7 +349,12 @@ dialog a{color:var(--accent)}
         <label class="chip"><input type="checkbox" id="optFollow" checked><span>地図を追従</span></label>
       </div>
       <ol id="laps" class="laps" aria-label="ラップ"></ol>
-      <p class="hint">画面を消すと位置の記録が止まる端末があります。走行中は画面をつけたままにしてください（対応端末では自動でスリープを防ぎます）。</p>
+      <div class="card">
+        <strong>画面を消すと記録が止まります</strong>
+        <p class="hint">iPhoneなどでは、画面がロックされると位置の記録が止まります。走るときは「ポケットモード」を使ってください。画面は点いたまま真っ黒になり、誤タッチを防ぎます。</p>
+        <p class="hint">自動で画面が消える場合は「設定 → 画面表示と明るさ → 自動ロック → なし」にしてください（走り終えたら元に戻しましょう）。</p>
+        <p class="hint">記録が途切れた場合は、再開したときに途切れた区間を道路沿いにつないで距離を補います。</p>
+      </div>
     </div>
 
     <!-- 保存 -->
@@ -349,6 +367,15 @@ dialog a{color:var(--accent)}
     </div>
   </div>
 </section>
+
+<div id="pocket" class="pocket" hidden aria-label="ポケットモード。長押しで解除">
+  <div><div class="pk-dist"><span id="pkDist">0.00</span><small>km</small></div><div class="pk-time" id="pkTime">0:00</div></div>
+  <div class="pk-hold">
+    <svg class="ring" viewBox="0 0 84 84"><circle class="bg" cx="42" cy="42" r="38"/><circle class="fg" cx="42" cy="42" r="38"/></svg>
+    <span>画面を長押しで解除</span>
+    <span class="pk-gps" id="pkGps"></span>
+  </div>
+</div>
 
 <dialog id="dlgSettings">
   <form method="dialog" id="settingsForm">
@@ -1137,7 +1164,7 @@ function navStart(){
   }, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
   N.timer = setInterval(renderNav, 1000);
   $('#laps').innerHTML = '';
-  $('#btnNavStart').hidden = true; $('#btnNavPause').hidden = false; $('#btnNavStop').hidden = false; $('#btnNavPause').textContent = '一時停止';
+  $('#btnNavStart').hidden = true; $('#btnNavPause').hidden = false; $('#btnNavStop').hidden = false; $('#btnPocket').hidden = false; $('#btnNavPause').textContent = '一時停止';
   if (!S.route) toast('ルートなしで記録します。ルート外れ通知はオフになります。');
   renderNav();
 }
@@ -1151,8 +1178,10 @@ function onPos(p){
   if (N.last){
     const d = hav(N.last, ll), dt = (p.timestamp - N.lastT)/1000;
     if (d < 4) return;
-    if (dt > 0 && d/dt > 11) return;
+    const gap = dt > 20 && d > 60;
+    if (!gap && dt > 0 && d/dt > 11) return;
     N.dist += d;
+    if (gap) fillGap(N.last, ll, d, dt, N.track.length);
   }
   N.last = ll; N.lastT = p.timestamp;
   const el = elapsedMs();
@@ -1160,6 +1189,25 @@ function onPos(p){
   trackLine.addLatLng(ll);
   N.recent.push({ t: el, d: N.dist }); while (N.recent.length > 2 && el - N.recent[0].t > 45000) N.recent.shift();
   checkLap(el); checkOff(ll);
+}
+/* 記録が途切れた区間（画面ロックなど）を道路沿いにつないで補う */
+async function fillGap(a, b, straight, dt, idx){
+  const t0 = N.track.length ? N.track[N.track.length-1][2] : 0;
+  let added = straight, how = '直線で';
+  if (store.get('orsKey', '')){
+    try {
+      const r = await ors([a, b], {});
+      if (r.distance >= straight && r.distance <= straight*2.5 && N.active){
+        N.dist += r.distance - straight; added = r.distance; how = '道路沿いに';
+        const mid = r.coords.slice(1, -1).map((c, i, arr) => [+c[0].toFixed(6), +c[1].toFixed(6), Math.round(t0 + dt*(i+1)/(arr.length+1))]);
+        N.track.splice(idx, 0, ...mid);
+        trackLine.setLatLngs(N.track.map(p => [p[0], p[1]]));
+      }
+    } catch(e){}
+  }
+  N.gapSec = (N.gapSec || 0) + dt;
+  toast(`記録が止まっていた約${Math.max(1, Math.round(dt/60))}分間の ${km(added)} km を${how}補いました`, 5000);
+  renderNav();
 }
 function checkLap(el){
   while (N.dist >= (N.laps.length+1)*1000){
@@ -1183,6 +1231,7 @@ function checkOff(ll){
 function renderNav(){
   const el = elapsedMs()/1000;
   $('#nDist').textContent = km(N.dist);
+  if (!$('#pocket').hidden){ $('#pkDist').textContent = km(N.dist); $('#pkTime').textContent = hms(el); $('#pkGps').textContent = $('#gpsText').textContent; }
   $('#nKcal').textContent = kcal(N.dist, 0);
   $('#nTime').textContent = hms(el);
   $('#nAvg').textContent = N.dist > 50 ? paceStr(el/(N.dist/1000)) : '--';
@@ -1205,7 +1254,7 @@ function navStop(){
   if (N.watch != null) navigator.geolocation.clearWatch(N.watch);
   clearInterval(N.timer);
   try { N.wake && N.wake.release(); } catch(e){}
-  N.wake = null; hideBanner();
+  N.wake = null; hideBanner(); pocket(false); $('#btnPocket').hidden = true;
   $('#btnNavStart').hidden = false; $('#btnNavPause').hidden = true; $('#btnNavStop').hidden = true;
   renderNav();
   if (N.dist >= 50){
@@ -1218,6 +1267,19 @@ function navStop(){
     toast(`記録しました：${km(N.dist)} km・${hms(N.elapsed/1000)}`, 4500);
   } else toast('距離が短いため記録しませんでした。');
 }
+/* ポケットモード */
+function pocket(on){
+  const el = $('#pocket'); el.hidden = !on; el.classList.remove('holding');
+  if (on){ wake(); renderNav(); }
+}
+(() => {
+  const el = $('#pocket'); let t = null;
+  const cancel = () => { clearTimeout(t); t = null; el.classList.remove('holding'); };
+  el.addEventListener('pointerdown', e => { e.preventDefault(); cancel(); void el.offsetWidth; el.classList.add('holding'); t = setTimeout(() => { cancel(); pocket(false); toast('ポケットモードを解除しました', 1500); }, 1200); });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => el.addEventListener(ev, cancel));
+  el.addEventListener('contextmenu', e => e.preventDefault());
+})();
+$('#btnPocket').onclick = () => pocket(true);
 $('#btnNavStart').onclick = navStart;
 $('#btnNavPause').onclick = navPause;
 $('#btnNavStop').onclick = navStop;
