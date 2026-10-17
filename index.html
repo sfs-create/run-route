@@ -163,6 +163,15 @@ h3{font-size:14px;margin:0;color:var(--muted);letter-spacing:.04em}
 .pin-s{background:var(--ok)}
 .pin-g{background:var(--pin-goal);color:var(--surface)}
 .pin-t{background:var(--route);font-size:12px;font-family:var(--f-body)}
+.pin-v{background:var(--accent);color:var(--accent-ink)}
+.vias{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.via-row{display:flex;align-items:center;gap:10px;border:1px solid var(--line);background:var(--surface-2);border-radius:12px;padding:4px 4px 4px 10px}
+.via-row .pin{width:26px;height:26px;font-size:13px;border-width:2px;flex:none}
+.via-row span{flex:1;min-width:0;font-size:14px}
+.via-row button{border:0;background:none;color:var(--warn);font-weight:700;padding:10px 12px;font-size:14px}
+.via-btns{display:grid;grid-template-columns:1fr auto;gap:8px}
+.btn.on{background:var(--route);border-color:var(--route);color:#fff}
+.banner.mode{border-left-color:var(--route)}
 .kmtag{background:var(--surface);color:var(--ink);border:2px solid var(--route);border-radius:999px;font:700 12px var(--f-num);display:grid;place-items:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .poi{border-radius:50%;display:grid;place-items:center;font:700 10px var(--f-body);color:#fff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35)}
 .poi-toilets{background:var(--poi-wc)}.poi-water{background:var(--poi-water)}.poi-vending{background:var(--poi-vend)}.poi-convenience{background:var(--poi-conv)}
@@ -270,6 +279,16 @@ dialog a{color:var(--accent)}
         <button class="btn" id="btnAlt" disabled>別のルート</button>
       </div>
       <button class="linkbtn" id="btnPickStart">出発地を地図で指定する</button>
+
+      <div class="field">
+        <span class="label">中間地点（通りたい場所）</span>
+        <ul class="vias" id="viaList"></ul>
+        <div class="via-btns">
+          <button class="btn small" id="btnAddVia">＋ 地図をタップして追加</button>
+          <button class="btn small ghost" id="btnClearVia" hidden>すべて消す</button>
+        </div>
+        <p class="hint">最大5か所。番号順に通ります。地図上のピンは長押しで動かせます。距離が足りないときは寄り道を足して指定距離に近づけます。</p>
+      </div>
 
       <div id="routeInfo" class="info" hidden></div>
 
@@ -448,7 +467,7 @@ function kcal(distM, upM){ const w = store.get('weight', null) || 60; return Mat
 function applyMapDark(){ document.documentElement.classList.toggle('map-dark', !!store.get('mapDark', false)); }
 
 /* ---------- 状態 ---------- */
-const S = { start: null, goal: null, shape: 'loop', seed: 1, route: null, tapMode: null, busy: false };
+const S = { start: null, goal: null, shape: 'loop', seed: 1, route: null, tapMode: null, busy: false, vias: [] };
 
 /* ---------- 地図 ---------- */
 const map = L.map('map', { zoomControl: false }).setView([35.6812, 139.7671], 14);
@@ -487,7 +506,7 @@ function fitPad(){
 let toastT;
 function toast(msg, ms = 3200){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, ms); }
 function banner(msg, warn){ const b = $('#banner'); b.textContent = msg; b.classList.toggle('warn', !!warn); b.hidden = false; }
-function hideBanner(){ $('#banner').hidden = true; }
+function hideBanner(){ $('#banner').hidden = true; $('#banner').classList.remove('mode'); }
 
 /* ---------- テーマ ---------- */
 const themes = ['system', 'dark', 'light'];
@@ -521,7 +540,7 @@ function locate(fly = true){
     askStart(err.code === 1 ? '位置情報の利用が許可されていません（ブラウザの設定で許可できます）。' : '現在地を取得できませんでした。');
   }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 });
 }
-function askStart(msg){ S.tapMode = 'start'; banner((msg ? msg + ' ' : '') + '地図をタップして出発地を指定してください。', !!msg); }
+function askStart(msg){ if (S.tapMode === 'via') setViaMode(false); S.tapMode = 'start'; banner((msg ? msg + ' ' : '') + '地図をタップして出発地を指定してください。', !!msg); }
 $('#btnLocate').onclick = () => locate(true);
 $('#btnPickStart').onclick = () => { askStart(''); if (innerWidth < 900) collapse(true); };
 
@@ -532,8 +551,41 @@ map.on('click', e => {
     if (S.shape === 'oneway' && !S.goal) banner('次に地図をタップしてゴール地点を指定してください。');
     collapse(false); return;
   }
+  if (S.tapMode === 'via'){ addVia(ll); return; }
   if (S.shape === 'oneway' && !N.active){ setGoal(ll); hideBanner(); toast('ゴールを設定しました'); collapse(false); }
 });
+
+/* ---------- 中間地点 ---------- */
+const MAX_VIA = 5;
+let viaMarkers = [];
+function setViaMode(on){
+  S.tapMode = on ? 'via' : (S.tapMode === 'via' ? null : S.tapMode);
+  const b = $('#btnAddVia');
+  b.classList.toggle('on', on);
+  b.textContent = on ? '追加をやめる' : '＋ 地図をタップして追加';
+  if (on){ $('#banner').classList.add('mode'); banner(`地図をタップして中間地点${S.vias.length + 1}を追加してください。`); if (innerWidth < 900) collapse(true); }
+  else hideBanner();
+}
+function addVia(ll){
+  if (S.vias.length >= MAX_VIA){ toast(`中間地点は${MAX_VIA}か所までです。`); setViaMode(false); return; }
+  S.vias.push(ll); renderVias();
+  toast(`中間地点${S.vias.length}を追加しました`, 1600);
+  if (S.vias.length >= MAX_VIA) setViaMode(false);
+  else banner(`続けてタップで中間地点${S.vias.length + 1}を追加。終わったら下の「追加をやめる」を押してください。`);
+}
+function renderVias(){
+  viaMarkers.forEach(m => map.removeLayer(m));
+  viaMarkers = S.vias.map((ll, i) => {
+    const m = L.marker(ll, { icon: pin(i + 1, 'pin-v'), draggable: true, zIndexOffset: 400 }).addTo(map);
+    m.on('dragend', () => { const p = m.getLatLng(); S.vias[i] = [p.lat, p.lng]; toast(`中間地点${i + 1}を移動しました`, 1500); });
+    return m;
+  });
+  $('#viaList').innerHTML = S.vias.map((ll, i) => `<li class="via-row"><i class="pin pin-v">${i + 1}</i><span>中間地点${i + 1}</span><button data-i="${i}" aria-label="中間地点${i + 1}を削除">削除</button></li>`).join('');
+  $('#btnClearVia').hidden = !S.vias.length;
+}
+$('#btnAddVia').onclick = () => setViaMode(S.tapMode !== 'via');
+$('#btnClearVia').onclick = () => { S.vias = []; renderVias(); setViaMode(false); toast('中間地点を消しました', 1500); };
+$('#viaList').onclick = e => { const b = e.target.closest('button'); if (!b) return; S.vias.splice(+b.dataset.i, 1); renderVias(); };
 
 /* ---------- 入力 ---------- */
 const distNum = $('#distNum'), distRange = $('#distRange'), paceIn = $('#pace');
@@ -698,6 +750,47 @@ async function buildOneWay(target, seed, p){
   return best;
 }
 
+/* 中間地点あり：指定した地点を順に通り、足りない分は一番長い区間に寄り道を入れて調整 */
+async function viaPath(pts, target, seed, p){
+  const direct = await ors(pts, { prefs: p });
+  direct.err = Math.abs(direct.distance - target)/target;
+  if (direct.distance >= target*0.95){
+    if (direct.distance > target*1.05) direct.note = `中間地点を通る最短ルートが ${km(direct.distance)} km あるため、指定した距離より長くなっています。`;
+    return direct;
+  }
+  let li = 0, ld = -1, sumHav = 0;
+  for (let i = 0; i < pts.length-1; i++){ const d = hav(pts[i], pts[i+1]); sumHav += d; if (d > ld){ ld = d; li = i; } }
+  const a = pts[li], b = pts[li+1], d = Math.max(ld, 30), mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
+  let k = Math.max(1, direct.distance/Math.max(sumHav, 30));
+  const otherLen = Math.max(0, direct.distance - ld*k);
+  const rnd = rng(seed), side = (rnd() < .5 ? 90 : -90) + (rnd()-.5)*40, brg = bearing(a, b);
+  let best = direct;
+  for (let i = 0; i < 4; i++){
+    const half = (target - otherLen)/(2*k);
+    const h = Math.sqrt(Math.max(half*half - (d/2)**2, 2500));
+    const detour = dest(mid, brg + side, h);
+    const r = await ors([...pts.slice(0, li+1), detour, ...pts.slice(li+1)], { prefs: p });
+    r.err = Math.abs(r.distance - target)/target;
+    if (r.err < best.err) best = r;
+    if (r.err <= 0.05) break;
+    k = Math.max(1, (r.distance - otherLen)/(2*Math.sqrt((d/2)**2 + h*h)));
+  }
+  return best;
+}
+async function buildWithVias(target, seed, p){
+  const vias = S.vias.slice();
+  if (S.shape === 'outback'){
+    const r = await viaPath([S.start, ...vias], target/2, seed, p);
+    const back = r.coords.slice(0, -1).reverse();
+    const c = { coords: r.coords.concat(back), distance: r.distance*2, ascent: r.ascent + r.descent, descent: r.ascent + r.descent, turn: r.coords[r.coords.length-1], weightsDropped: r.weightsDropped, note: r.note };
+    c.err = Math.abs(c.distance - target)/target;
+    return c;
+  }
+  if (S.shape === 'oneway' && !S.goal) throw new AppError('片道では、地図をタップしてゴール地点を指定してください。');
+  const end = S.shape === 'oneway' ? S.goal : S.start;
+  return viaPath([S.start, ...vias, end], target, seed, p);
+}
+
 /* ---------- Overpass（信号・街灯・施設） ---------- */
 async function overpass(q){
   const eps = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
@@ -743,7 +836,8 @@ async function generate(newSeed){
   const target = targetKm()*1000, p = prefs();
   const multi = p.flat || p.signals || p.lit;
   const seeds = multi ? [S.seed*10, S.seed*10+1, S.seed*10+2] : [S.seed*10];
-  const builder = { loop: buildLoop, outback: buildOutBack, oneway: buildOneWay }[S.shape];
+  if (S.tapMode === 'via') setViaMode(false);
+  const builder = S.vias.length ? buildWithVias : { loop: buildLoop, outback: buildOutBack, oneway: buildOneWay }[S.shape];
   setBusy(true, multi ? '候補を作成中…' : 'ルートを作成中…');
   const notes = [];
   try {
@@ -762,7 +856,7 @@ async function generate(newSeed){
     if (best.note) notes.push(best.note);
     if (best.err > 0.05 && !best.note) notes.push(`道の形の都合で、指定距離との差が ${Math.round(best.err*100)}% あります。「別のルート」で近いものが出ることがあります。`);
     if (best.weightsDropped) notes.push('この地域では「大通りを避ける／緑優先」のデータがないため、通常のルートで作成しました。');
-    best.shape = S.shape; best.target = target; best.candidates = ok.length; best.notes = notes;
+    best.shape = S.shape; best.target = target; best.viaCount = S.vias.length; best.candidates = ok.length; best.notes = notes;
     setRoute(best, true);
   } catch(e){
     toast(e instanceof AppError ? e.message : 'ルートを作成できませんでした。もう一度お試しください。', 5000);
@@ -838,6 +932,7 @@ function renderInfo(){
   if (!r){ box.hidden = true; return; }
   const shapeName = { loop: '周回', outback: '往復', oneway: '片道' }[r.shape] || '';
   const tags = [shapeName];
+  if (r.viaCount) tags.push(`中間地点 ${r.viaCount}か所`);
   if (r.candidates > 1) tags.push(`${r.candidates}候補から選択`);
   if (r.signals != null) tags.push(`信号 約${r.signals}か所`);
   if (r.litFrac != null) tags.push(`街灯あり ${Math.round(r.litFrac*100)}%`);
