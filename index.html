@@ -190,6 +190,12 @@ h3{font-size:14px;margin:0;color:var(--muted);letter-spacing:.04em}
 .via-btns{display:grid;grid-template-columns:1fr auto;gap:8px}
 .btn.on{background:var(--route);border-color:var(--route);color:#fff}
 .banner.mode{border-left-color:var(--route)}
+.cands{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.cand{border:1px solid var(--line);background:var(--surface-2);border-radius:12px;padding:8px 6px;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0}
+.cand b{font-family:var(--f-num);font-size:22px;line-height:1.1}
+.cand b small{font-size:12px;color:var(--muted);margin-left:2px}
+.cand span{font-size:11.5px;color:var(--muted);white-space:nowrap}
+.cand.on{border-color:var(--route);box-shadow:inset 0 0 0 1px var(--route);background:var(--surface)}
 .kmtag{background:var(--surface);color:var(--ink);border:2px solid var(--route);border-radius:999px;font:700 12px var(--f-num);display:grid;place-items:center;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .poi{border-radius:50%;display:grid;place-items:center;font:700 10px var(--f-body);color:#fff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35)}
 .poi-toilets{background:var(--poi-wc)}.poi-water{background:var(--poi-water)}.poi-vending{background:var(--poi-vend)}.poi-convenience{background:var(--poi-conv)}
@@ -298,6 +304,10 @@ dialog a{color:var(--accent)}
       <div class="actions">
         <button class="btn primary" id="btnGen">ルートを作成</button>
         <button class="btn" id="btnAlt" disabled>別のルート</button>
+      </div>
+      <div class="field" id="candField" hidden>
+        <span class="label">距離の候補（タップで切り替え）</span>
+        <div class="cands" id="cands"></div>
       </div>
       <button class="linkbtn" id="btnPickStart">出発地を地図で指定する</button>
 
@@ -797,101 +807,108 @@ async function ors(points, opt = {}){
   if (!f) throw new AppError('ルートが見つかりませんでした。');
   return {
     coords: f.geometry.coordinates.map(c => [c[1], c[0], c[2] ?? null]),
-    distance: (f.properties.summary && f.properties.summary.distance) || 0,
+    distance: geoDist(f.geometry.coordinates.map(c => [c[1], c[0]])) || (f.properties.summary && f.properties.summary.distance) || 0,
     ascent: f.properties.ascent || 0, descent: f.properties.descent || 0, weightsDropped: false
   };
 }
 
 /* ---------- ルート生成 ---------- */
-async function buildLoop(target, seed, p){
-  let len = target, best = null;
-  for (let i = 0; i < 4; i++){
-    const r = await ors([S.start], { prefs: p, roundTrip: { length: Math.round(len), points: target > 12000 ? 4 : 3, seed } });
-    r.err = Math.abs(r.distance - target)/target;
-    if (!best || r.err < best.err) best = r;
-    if (r.err <= 0.05) break;
-    len = Math.min(100000, Math.max(400, len*target/Math.max(r.distance, 1)));
-  }
-  return best;
+/* 指定距離との差の目標：±1.5%。試した道はすべて候補として残し、近いものを選べるようにする */
+const TOL = 0.015, MAX_TRY = 7;
+function geoDist(coords){ let d = 0; for (let i = 1; i < coords.length; i++) d += hav(coords[i-1], coords[i]); return d; }
+function climbOf(coords){
+  let up = 0, down = 0, ref = null;
+  for (const c of coords){ if (c[2] == null) continue; if (ref == null){ ref = c[2]; continue; } const d = c[2] - ref; if (d >= 3){ up += d; ref = c[2]; } else if (d <= -3){ down -= d; ref = c[2]; } }
+  return { up, down };
 }
-async function buildOutBack(target, seed, p){
-  const half = target/2, brg = rng(seed)()*360;
-  let rad_ = half*0.7, best = null;
-  for (let i = 0; i < 4; i++){
-    const turn = dest(S.start, brg, rad_);
-    const r = await ors([S.start, turn], { prefs: p });
-    const back = r.coords.slice(0, -1).reverse();
-    const c = { coords: r.coords.concat(back), distance: r.distance*2, ascent: r.ascent + r.descent, descent: r.ascent + r.descent, turn: r.coords[r.coords.length-1], weightsDropped: r.weightsDropped };
-    c.err = Math.abs(c.distance - target)/target;
-    if (!best || c.err < best.err) best = c;
-    if (c.err <= 0.05) break;
-    rad_ = Math.max(50, rad_*half/Math.max(r.distance, 1));
+/* 道に沿って先頭から m メートルの所で切る */
+function cutAt(coords, m){
+  const out = [coords[0]]; let acc = 0;
+  for (let i = 1; i < coords.length; i++){
+    const a = coords[i-1], b = coords[i], d = hav(a, b);
+    if (acc + d >= m){
+      const t = (m - acc)/Math.max(d, 1e-9);
+      out.push([a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t, a[2] != null && b[2] != null ? a[2] + (b[2]-a[2])*t : (a[2] ?? b[2])]);
+      return out;
+    }
+    acc += d; out.push(b);
   }
-  return best;
+  return out;
+}
+const mark = (r, target) => { r.err = Math.abs(r.distance - target)/target; return r; };
+function mirror(r){
+  const back = r.coords.slice(0, -1).reverse();
+  return { coords: r.coords.concat(back), distance: r.distance*2, ascent: r.ascent + r.descent, descent: r.ascent + r.descent, turn: r.coords[r.coords.length-1], weightsDropped: r.weightsDropped, note: r.note };
+}
+
+async function buildLoop(target, seed, p){
+  const tries = []; let len = target, sd = seed;
+  for (let i = 0; i < MAX_TRY; i++){
+    const r = mark(await ors([S.start], { prefs: p, roundTrip: { length: Math.round(len), points: target > 12000 ? 4 : 3, seed: sd } }), target);
+    r.len = Math.round(len);
+    tries.push(r);
+    if (r.err <= TOL) break;
+    // 指定より短い結果と長い結果がそろったら、その間を補間して次の長さを決める
+    const lo = tries.filter(t => t.distance < target).sort((a, b) => b.distance - a.distance)[0];
+    const hi = tries.filter(t => t.distance > target).sort((a, b) => a.distance - b.distance)[0];
+    if (lo && hi && hi.len !== lo.len){
+      let next = lo.len + (target - lo.distance)*(hi.len - lo.len)/(hi.distance - lo.distance);
+      if (tries.some(t => Math.abs(t.len - next) < 5)) next += (i % 2 ? 1 : -1)*target*0.01;
+      len = next;
+    } else len = len*target/Math.max(r.distance, 1);
+    len = Math.min(100000, Math.max(400, len));
+  }
+  return tries;
+}
+/* 往復：折り返し地点までの道を、ちょうど半分の距離で切るので指定距離ぴったりになる */
+async function buildOutBack(target, seed, p){
+  const half = target/2, brg = rng(seed)()*360, tries = [];
+  let reach = half*0.65;
+  for (let i = 0; i < 4; i++){
+    const r = await ors([S.start, dest(S.start, brg, reach)], { prefs: p });
+    if (r.distance >= half){
+      const out = cutAt(r.coords, half), cl = climbOf(out);
+      tries.push(mark(mirror({ coords: out, distance: geoDist(out), ascent: cl.up, descent: cl.down, weightsDropped: r.weightsDropped }), target));
+      break;
+    }
+    tries.push(mark(mirror(r), target));
+    reach = Math.max(80, reach*half/Math.max(r.distance, 1)*1.15);
+  }
+  return tries;
 }
 async function buildOneWay(target, seed, p){
   if (!S.goal) throw new AppError('片道では、地図をタップしてゴール地点を指定してください。');
-  const direct = await ors([S.start, S.goal], { prefs: p });
-  direct.err = Math.abs(direct.distance - target)/target;
-  if (direct.distance >= target*0.95){
-    if (direct.distance > target*1.05) direct.note = `ゴールまでの最短ルートが ${km(direct.distance)} km あるため、指定した距離より長くなっています。`;
-    return direct;
-  }
-  const d = Math.max(hav(S.start, S.goal), 30), mid = [(S.start[0]+S.goal[0])/2, (S.start[1]+S.goal[1])/2];
-  const rnd = rng(seed), side = (rnd() < .5 ? 90 : -90) + (rnd()-.5)*40, brg = bearing(S.start, S.goal);
-  let k = Math.max(1, direct.distance/d), best = direct;
-  for (let i = 0; i < 4; i++){
-    const half = target/(2*k);
-    const h = Math.sqrt(Math.max(half*half - (d/2)**2, 2500));
-    const via = dest(mid, brg + side, h);
-    const r = await ors([S.start, via, S.goal], { prefs: p });
-    r.err = Math.abs(r.distance - target)/target;
-    if (r.err < best.err) best = r;
-    if (r.err <= 0.05) break;
-    k = Math.max(1, r.distance/(2*Math.sqrt((d/2)**2 + h*h)));
-  }
-  return best;
+  return viaPath([S.start, S.goal], target, seed, p, 'ゴールまでの最短ルート');
 }
-
-/* 中間地点あり：指定した地点を順に通り、足りない分は一番長い区間に寄り道を入れて調整 */
-async function viaPath(pts, target, seed, p){
-  const direct = await ors(pts, { prefs: p });
-  direct.err = Math.abs(direct.distance - target)/target;
-  if (direct.distance >= target*0.95){
-    if (direct.distance > target*1.05) direct.note = `中間地点を通る最短ルートが ${km(direct.distance)} km あるため、指定した距離より長くなっています。`;
-    return direct;
+/* 指定した地点を順に通り、足りない分は一番長い区間に寄り道を入れて調整 */
+async function viaPath(pts, target, seed, p, what = '中間地点を通る最短ルート'){
+  const direct = mark(await ors(pts, { prefs: p }), target);
+  if (direct.distance >= target*(1 - TOL)){
+    if (direct.distance > target*(1 + TOL)) direct.note = `${what}が ${km(direct.distance)} km あるため、指定した距離より長くなっています。`;
+    return [direct];
   }
+  const tries = [direct];
   let li = 0, ld = -1, sumHav = 0;
   for (let i = 0; i < pts.length-1; i++){ const d = hav(pts[i], pts[i+1]); sumHav += d; if (d > ld){ ld = d; li = i; } }
   const a = pts[li], b = pts[li+1], d = Math.max(ld, 30), mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
   let k = Math.max(1, direct.distance/Math.max(sumHav, 30));
   const otherLen = Math.max(0, direct.distance - ld*k);
   const rnd = rng(seed), side = (rnd() < .5 ? 90 : -90) + (rnd()-.5)*40, brg = bearing(a, b);
-  let best = direct;
-  for (let i = 0; i < 4; i++){
+  for (let i = 0; i < MAX_TRY - 1; i++){
     const half = (target - otherLen)/(2*k);
     const h = Math.sqrt(Math.max(half*half - (d/2)**2, 2500));
-    const detour = dest(mid, brg + side, h);
-    const r = await ors([...pts.slice(0, li+1), detour, ...pts.slice(li+1)], { prefs: p });
-    r.err = Math.abs(r.distance - target)/target;
-    if (r.err < best.err) best = r;
-    if (r.err <= 0.05) break;
+    const r = mark(await ors([...pts.slice(0, li+1), dest(mid, brg + side, h), ...pts.slice(li+1)], { prefs: p }), target);
+    tries.push(r);
+    if (r.err <= TOL) break;
     k = Math.max(1, (r.distance - otherLen)/(2*Math.sqrt((d/2)**2 + h*h)));
   }
-  return best;
+  return tries;
 }
 async function buildWithVias(target, seed, p){
   const vias = S.vias.slice();
-  if (S.shape === 'outback'){
-    const r = await viaPath([S.start, ...vias], target/2, seed, p);
-    const back = r.coords.slice(0, -1).reverse();
-    const c = { coords: r.coords.concat(back), distance: r.distance*2, ascent: r.ascent + r.descent, descent: r.ascent + r.descent, turn: r.coords[r.coords.length-1], weightsDropped: r.weightsDropped, note: r.note };
-    c.err = Math.abs(c.distance - target)/target;
-    return c;
-  }
+  if (S.shape === 'outback') return (await viaPath([S.start, ...vias], target/2, seed, p)).map(r => mark(mirror(r), target));
   if (S.shape === 'oneway' && !S.goal) throw new AppError('片道では、地図をタップしてゴール地点を指定してください。');
-  const end = S.shape === 'oneway' ? S.goal : S.start;
-  return viaPath([S.start, ...vias, end], target, seed, p);
+  return viaPath([S.start, ...vias, S.shape === 'oneway' ? S.goal : S.start], target, seed, p);
 }
 
 /* ---------- Overpass（信号・街灯・施設） ---------- */
@@ -945,7 +962,10 @@ async function generate(newSeed){
   const notes = [];
   try {
     const results = await Promise.allSettled(seeds.map(sd => builder(target, sd, p)));
-    const ok = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
+    const ok = [];
+    for (const c of results.filter(r => r.status === 'fulfilled' && r.value).flatMap(r => r.value)){
+      if (!ok.some(o => Math.abs(o.distance - c.distance) < 15)) ok.push(c);
+    }
     if (!ok.length) throw results[0].reason;
     if (p.signals || p.lit){
       setBusy(true, '信号・街灯を確認中…');
@@ -957,9 +977,10 @@ async function generate(newSeed){
     ok.sort((a, b) => a.score - b.score);
     const best = ok[0];
     if (best.note) notes.push(best.note);
-    if (best.err > 0.05 && !best.note) notes.push(`道の形の都合で、指定距離との差が ${Math.round(best.err*100)}% あります。「別のルート」で近いものが出ることがあります。`);
+    if (best.err > 0.03 && !best.note) notes.push(`道の形の都合で、指定距離との差が ${(best.err*100).toFixed(1)}% あります。下の候補から選ぶか、「別のルート」を試してください。`);
     if (best.weightsDropped) notes.push('この地域では「大通りを避ける／緑優先」のデータがないため、通常のルートで作成しました。');
-    best.shape = S.shape; best.target = target; best.viaCount = S.vias.length; best.candidates = ok.length; best.notes = notes;
+    for (const c of ok){ c.shape = S.shape; c.target = target; c.viaCount = S.vias.length; c.candidates = ok.length; c.notes = c === best ? notes : (c.note ? [c.note] : []); }
+    S.cands = ok.filter(c => c === best || c.err <= 0.08).slice(0, 3);
     setRoute(best, true);
   } catch(e){
     toast(e instanceof AppError ? e.message : 'ルートを作成できませんでした。もう一度お試しください。', 5000);
@@ -989,9 +1010,17 @@ function setRoute(r, fit){
   updateSummary(); renderInfo(); drawElev();
   $('#saveField').hidden = false; $('#poiField').hidden = false; $('#btnAlt').disabled = false;
   $('#routeName').value = r.name || '';
-  loadPois(); syncGmaps();
+  loadPois(); syncGmaps(); renderCands();
   store.set('lastRoute', compact(r));
 }
+function renderCands(){
+  const list = (S.cands || []).filter(c => c.coords), box = $('#cands');
+  $('#candField').hidden = list.length < 2;
+  if (list.length < 2) return;
+  const sorted = list.slice().sort((a, b) => a.err - b.err);
+  box.innerHTML = sorted.map((c, i) => { const diff = (c.distance - c.target)/c.target*100; return `<button class="cand${c === S.route ? ' on' : ''}" data-i="${list.indexOf(c)}"><b>${km(c.distance)}<small>km</small></b><span>${Math.abs(diff) < 0.5 ? 'ほぼぴったり' : (diff > 0 ? '+' : '') + diff.toFixed(1) + '%'}</span><span>上り ${Math.round(c.ascent)} m</span></button>`; }).join('');
+}
+$('#cands').onclick = e => { const b = e.target.closest('.cand'); if (!b || N.active) return; const c = S.cands[+b.dataset.i]; if (c && c !== S.route) setRoute(c, true); };
 function drawRoute(fit){
   routeLayer.clearLayers();
   const r = S.route; if (!r) return;
@@ -1204,7 +1233,7 @@ $('#favList').onclick = e => {
     const r = { ...f, coords: f.coords.map(c => c.slice()), notes: [], candidates: 1 };
     setStart([r.coords[0][0], r.coords[0][1]]);
     if (r.shape === 'oneway') setGoal([r.coords[r.coords.length-1][0], r.coords[r.coords.length-1][1]]);
-    setRoute(r, true); showTab('route'); toast(`「${f.name}」を表示しました`);
+    S.cands = []; setRoute(r, true); showTab('route'); toast(`「${f.name}」を表示しました`);
   } else if (b.dataset.act === 'gpx'){ download(fileSafe(f.name) + '.gpx', gpxText(f.name, f.coords)); }
   else if (b.dataset.act === 'del' && confirmTap(b, 'f'+id)){ store.set('favs', favs.filter(x => x.id !== id)); renderSaved(); toast('削除しました'); }
 };
