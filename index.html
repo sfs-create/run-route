@@ -384,6 +384,7 @@ dialog a{color:var(--accent)}
     <input id="apiKey" class="text" type="password" autocomplete="off" spellcheck="false" placeholder="ここに貼り付け">
     <label class="inline"><input type="checkbox" id="showKey"> キーを表示する</label>
     <p class="hint"><a href="https://openrouteservice.org/dev/#/signup" target="_blank" rel="noopener">openrouteservice.org</a> で無料登録し、Dashboard の「Request a token」で作成したキーを貼り付けてください。キーはこの端末の中だけに保存されます。</p>
+    <p class="hint" id="sharedNote" hidden>空欄のままでも、アプリに入っている共有キーで使えます。共有キーが混み合っているときは、自分のキーを入れると確実です。</p>
     <label for="weight" class="label">体重（消費カロリーの計算に使います）</label>
     <div class="row" style="grid-template-columns:1fr auto"><input id="weight" class="text" type="number" inputmode="decimal" min="20" max="200" step="0.1" placeholder="例：60"><span class="unit" style="align-self:center">kg</span></div>
     <label class="inline"><input type="checkbox" id="mapDark"> ダークモードのとき地図も暗くする</label>
@@ -405,6 +406,9 @@ const store = {
   set(k, v){ try{ localStorage.setItem('rr_'+k, JSON.stringify(v)); return true; }catch(e){ return false; } }
 };
 class AppError extends Error {}
+/* 共有キー：設定で自分のキーを入れていない人はこのキーを使う */
+const SHARED_ORS_KEY = '';
+const orsKey = () => store.get('orsKey', '') || SHARED_ORS_KEY;
 const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 /* ---------- 地理計算 ---------- */
@@ -670,7 +674,7 @@ const toggleSheet = () => collapse(!$('#sheet').classList.contains('collapsed'))
 
 /* ---------- 設定 ---------- */
 const dlg = $('#dlgSettings');
-function openSettings(){ $('#apiKey').value = store.get('orsKey', ''); $('#weight').value = store.get('weight', '') || ''; $('#mapDark').checked = !!store.get('mapDark', false); dlg.showModal(); }
+function openSettings(){ $('#sharedNote').hidden = !SHARED_ORS_KEY; $('#apiKey').value = store.get('orsKey', ''); $('#weight').value = store.get('weight', '') || ''; $('#mapDark').checked = !!store.get('mapDark', false); dlg.showModal(); }
 $('#btnSettings').onclick = openSettings;
 $('#btnKeyOpen').onclick = openSettings;
 $('#showKey').onchange = e => $('#apiKey').type = e.target.checked ? 'text' : 'password';
@@ -681,20 +685,20 @@ dlg.addEventListener('close', () => {
     store.set('mapDark', $('#mapDark').checked); applyMapDark();
     updateSummary(); toast('設定を保存しました');
   }
-  $('#keyCard').hidden = !!store.get('orsKey', '');
+  $('#keyCard').hidden = !!orsKey();
 });
 
 /* ---------- OpenRouteService ---------- */
 function orsError(status, code, msg){
   if (status === 401 || status === 403) return new AppError('APIキーが正しくないようです。設定から確認してください。');
-  if (status === 429) return new AppError('APIの利用回数の上限に達しました。1分ほど待ってからもう一度お試しください。');
+  if (status === 429) return new AppError(store.get('orsKey', '') ? 'APIの利用回数の上限に達しました。1分ほど待ってからもう一度お試しください。' : '共有キーの利用回数の上限に達しました。時間をおくか、設定から自分のAPIキーを入れてください。');
   if (code === 2010 || /routable point/i.test(msg)) return new AppError('近くに走れる道が見つかりません。出発地やゴールを道路の近くに変えてください。');
   if (code === 2004 || /distance/i.test(msg)) return new AppError('距離が長すぎてルートを作れませんでした。距離を短くしてください。');
   if (code === 2009 || /could not be found/i.test(msg)) return new AppError('ルートが見つかりませんでした。地点を変えてお試しください。');
   return new AppError(`ルートを作成できませんでした（エラー ${status}）。しばらくしてからお試しください。`);
 }
 async function ors(points, opt = {}){
-  const key = store.get('orsKey', '');
+  const key = orsKey();
   if (!key){ $('#keyCard').hidden = false; throw new AppError('APIキーが未設定です。右上の設定から OpenRouteService のAPIキーを入力してください。'); }
   const p = opt.prefs || {};
   const body = { coordinates: points.map(c => [c[1], c[0]]), elevation: true, instructions: false };
@@ -1194,7 +1198,7 @@ function onPos(p){
 async function fillGap(a, b, straight, dt, idx){
   const t0 = N.track.length ? N.track[N.track.length-1][2] : 0;
   let added = straight, how = '直線で';
-  if (store.get('orsKey', '')){
+  if (orsKey()){
     try {
       const r = await ors([a, b], {});
       if (r.distance >= straight && r.distance <= straight*2.5 && N.active){
@@ -1290,7 +1294,7 @@ setDist(store.get('dist', 5));
 paceIn.value = store.get('pace', '6:00');
 S.shape = store.get('shape', 'loop');
 const shapeRadio = $(`input[name=shape][value="${S.shape}"]`); if (shapeRadio) shapeRadio.checked = true;
-$('#keyCard').hidden = !!store.get('orsKey', '');
+$('#keyCard').hidden = !!orsKey();
 applyMapDark();
 applyTheme();
 collapse(false);
